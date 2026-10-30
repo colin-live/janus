@@ -1,0 +1,20 @@
+[package]
+name = "coupling-shm"
+description = "Block B2: named shared memory mapping, notifier, heartbeat (OS layer)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+coupling-core.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Memory",
+    "Win32_System_Threading",
+] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
