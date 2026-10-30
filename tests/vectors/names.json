@@ -1,0 +1,10 @@
+﻿{
+  "cases": [
+    { "sim_id": "0x1234abcd5678ef90", "instance_id": 1,
+      "windows": { "segment": "Local\\wcp.1234abcd5678ef90.1", "s2m": "Local\\wcp.1234abcd5678ef90.1.s2m", "m2s": "Local\\wcp.1234abcd5678ef90.1.m2s" },
+      "linux":   { "segment": "/wcp.1234abcd5678ef90.1", "s2m": "/wcp.1234abcd5678ef90.1.s2m", "m2s": "/wcp.1234abcd5678ef90.1.m2s" } },
+    { "sim_id": "0x1", "instance_id": 12,
+      "windows": { "segment": "Local\\wcp.0000000000000001.12", "s2m": "Local\\wcp.0000000000000001.12.s2m", "m2s": "Local\\wcp.0000000000000001.12.m2s" },
+      "linux":   { "segment": "/wcp.0000000000000001.12", "s2m": "/wcp.0000000000000001.12.s2m", "m2s": "/wcp.0000000000000001.12.m2s" } }
+  ]
+}

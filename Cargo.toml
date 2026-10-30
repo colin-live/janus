@@ -1,0 +1,22 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/coupling-core",
+    "crates/coupling-shm",
+    "crates/coupling-config",
+    "crates/coupling-client",
+    "crates/coupling-host",
+    "crates/mock-webots",
+    "crates/dcmotor-model",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+coupling-core = { path = "crates/coupling-core" }
+coupling-shm = { path = "crates/coupling-shm" }
+coupling-config = { path = "crates/coupling-config" }
+coupling-client = { path = "crates/coupling-client" }

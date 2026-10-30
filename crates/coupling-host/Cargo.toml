@@ -1,0 +1,11 @@
+[package]
+name = "coupling-host"
+description = "Block B5: coupling-host application (bind, negotiate, supervise)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+coupling-core.workspace = true
+coupling-shm.workspace = true
+coupling-config.workspace = true

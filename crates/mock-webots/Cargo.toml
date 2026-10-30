@@ -1,0 +1,10 @@
+[package]
+name = "mock-webots"
+description = "Block B6: fake Webots master for testing without Webots"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+coupling-core.workspace = true
+coupling-shm.workspace = true
