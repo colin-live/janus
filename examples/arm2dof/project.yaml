@@ -1,0 +1,30 @@
+# 2-DOF arm reference project (B3 acceptance fixture).
+# Paths are relative to this file.
+coupling_version: 1
+
+simulation:
+  world: worlds/arm2dof.wbt
+  basic_time_step_ms: 1.0
+  sync_mode: lockstep
+  model_timeout_ms: 50
+  effort_policy: { ttl_steps: 1, on_timeout: zero, max_consecutive_misses: 3 }
+
+models:
+  dc_motor:
+    launch:
+      exe: bin/dcmotor-model
+      args: ["--params", "models/shoulder_motor.yaml"]
+    # attach: true
+
+instances:
+  shoulder_motor: { model: dc_motor, id: 1 }
+
+bindings:
+  - instance: shoulder_motor
+    entities:
+      joint: { webots_def: SHOULDER_JOINT, kind: joint }
+    slots:
+      - { signal: joint_position, entity: joint, required: true }
+      - { signal: joint_velocity, entity: joint, required: true }
+      - { signal: joint_torque,   entity: joint, required: true,
+          limits: { max_abs: 5.0, max_rate_per_s: 2000.0 } }
