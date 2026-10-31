@@ -26,15 +26,15 @@ impl ModelClient {
 }
 ```
 ## C ABI（`include/wcp_client.h`，名字冻结）
-`wcp_connect, wcp_close, wcp_manifest_json, wcp_slot_by_name, wcp_wait_step, wcp_read_f64, wcp_read_vec3, wcp_read_quat, wcp_write_f64, wcp_write_vec3, wcp_invalidate, wcp_commit`；返回 0 成功、1 超时/无效值、<0 错误；错误文本通过 `wcp_last_error()` 获取。`crate-type = ["rlib", "cdylib"]`。
+`wcp_connect, wcp_close, wcp_manifest_json, wcp_slot_by_name, wcp_wait_step, wcp_ack_reset, wcp_read_f64, wcp_read_vec3, wcp_read_quat, wcp_write_f64, wcp_write_vec3, wcp_invalidate, wcp_commit`；返回码：0 成功、1 超时/值不可用、**2 `WCP_RESET`（仅 `wcp_wait_step`：epoch 复位，`*out` 只带新 epoch，模型复位后调 `wcp_ack_reset`、不得 commit）**、**3 `WCP_CLOSED`（仅 `wcp_wait_step`：适配器干净关停，模型应退出）**、<0 错误；错误文本通过 `wcp_last_error()` 获取；`wcp_ack_reset` 无 pending、写槽方向/类型不对、`wcp_invalidate` 目标不是 effort 槽时返回 <0。`crate-type = ["rlib", "cdylib"]`。
 
 ## Python 绑定（`python/wcp_client.py`）
-用 `ctypes` 包装 C ABI，API 与 Rust 同名（`ModelClient.connect/slot/wait_step/read_f64/write_f64/commit`）。无第三方依赖。
+用 `ctypes` 包装 C ABI，API 与 Rust 同名（`ModelClient.connect/slot/wait_step/read_f64/write_f64/commit`）。`wait_step` 超时返回 `None`、复位返回 `Reset`（随后调用 `ack_reset()`）、干净关停抛 `Closed`（`WcpError` 子类），其余失败抛 `WcpError`。无第三方依赖。
 
 ## 详细需求
-1. `connect`：`open` 段（对 `NotFound`/`BadMagic` 在超时内重试）→ 读 header 校验（魔数/主版本）→ 读 manifest，用 `Manifest::slot_specs()` + `Layout::from_header()` 重建布局 → **对每个槽做边界校验**（`value_offset + 大小 ≤ Segment::len()`，否则报错；B2 的 `read_f64` 越界会 panic）→ 写 hello（协议 §9）→ `hs_state=Hello` → 等待 `Ready`（超时报错；`Error` 时把 report 或原因带进错误）。
+1. `connect`：`open` 段（对 `NotFound`/`BadMagic` 在超时内重试）→ 读 header 校验（魔数/主版本）→ 读 manifest，用 `Manifest::slot_specs()` + `Layout::from_header()` 重建布局 → **对每个槽做边界校验**（`value_offset + 大小 ≤ Segment::len()`，否则报错；B2 的 `read_f64` 越界会 panic）→ 写 hello（协议 §9）→ `hs_state=Hello` → 等待 `Ready`/`Running`/`Paused`（超时报错；`Error` 时把 report 或原因带进错误，这是唯一把 `Error` 视为致命的阶段）。
 2. `wait_step`：调用 `Notifier::wait`；醒来后**先**读 `epoch`：与已知值不同 → 返回 `WaitEvent::Reset`（不携带步，模型复位后调用 `ack_reset()`，SDK 记下 `last=0`）；再读 `step_id.load(Acquire)`，为 0 或等于上次处理的 id 则继续等；否则返回 `Step`。（协议 §7 的复位流程：适配器复位时会唤醒模型，不依赖下一个步。）
-3. `commit`：写 `model_heartbeat`、`effort_step_id.store(step_id, Release)`、`signal(m2s)`；每次 `wait_step` 后必须恰好 `commit` 一次，重复 commit 返回错误。
+3. `commit`：写 `model_heartbeat`、`effort_step_id.store(step_id, Release)`、`signal(m2s)`；**每次 `WaitEvent::Step` 后恰好 `commit` 一次；`WaitEvent::Reset` 后调用 `ack_reset()`，不得 commit**（此时 `commit` 返回 `NoPendingStep`）；重复 commit 返回错误。
 4. 读槽时尊重 validity；对 `enabled=false` 的槽 `slot()` 返回 `None`。
 5. 把 manifest/hello 解析放在 B1.1 的类型上，不重复定义。
 6. 线程模型：一个 `ModelClient` 非 `Sync`，单线程使用即可。
@@ -80,9 +80,47 @@ impl ModelClient {
 
 ### 已知限制 / 实现说明
 
-- `connect` 对 `NotFound`、`BadMagic`、空 manifest 在同一个 deadline 内重试，随后等待 `Ready`；校验请求/header/manifest 的 id 一致、`sync_mode == lockstep`、槽方向/类型及槽边界（`value_offset + 类型大小 ≤ Segment::len()`）。
-- `write_f64`/`write_vec3` 写错方向或类型时 `debug_assert!` 并忽略（冻结签名无错误返回）；非有限数只把 validity 置 `Invalid`，不写值。
+- `connect` 对 `NotFound`、`BadMagic`、空 manifest 在同一个 deadline 内重试，随后等待 `Ready`/`Running`/`Paused`；校验请求/header/manifest 的 id 一致、`sync_mode == lockstep`、槽方向/类型及槽边界（`value_offset + 类型大小 ≤ Segment::len()`）。
+- `write_f64`/`write_vec3` 写错方向或类型时，冻结签名保留 `debug_assert!` 并忽略；需要检测误用请用 `try_*`（返回 `WrongSlot`），FFI/Python 已改用 `try_*` 并返回错误。非有限数只把 validity 置 `Invalid`，不写值。
+- `wait_step` 只在 `hs_state == Closed` 时返回 `ClientError::Closed`；`Error` 可恢复（等待 reset 并 ack），`connect` 阶段仍视为致命。`hs_state()` 暴露当前握手状态供模型记录。
 - Windows 上 `Notifier::wait` 的定时精度受系统调度影响，超时为尽力而为。
 - Python 绑定按 `WCP_CLIENT_LIB` 或工作区 `target/{debug,release}` 查找 cdylib；测试 fixture 先 `cargo build -p coupling-client`（生成 cdylib）再构建 `mock_host`。
 - C 冒烟脚本在 Windows 需要 gcc；部分 MSYS2 把 `libgcc_s_seh-1.dll` / `libwinpthread-1.dll` 放在 `.../ucrt64/bin/cpp`，脚本已自动把该目录加入 `PATH`。
 - 运行 pytest 会在仓库根生成 `.pytest_cache/`（未提交）。
+
+
+## 评审（B1/协议负责人，2026-10-31）
+
+**结论：验收通过，附 4 个小的跟进项（不阻塞 B5/B7 开工）。**
+
+### 我独立复核了什么
+- `cargo test -p coupling-client`（api 3、lockstep 3、doctest 1）、`cargo clippy -p coupling-client --all-targets -- -D warnings`、`python -m pytest crates/coupling-client/python`（2 passed）、`run_c_smoke.ps1 -Steps 1000`（`C_SMOKE_OK`）——全部在我这边复现通过。
+- **跨实现互操作**（一次性脚本，未入库）：B8 的 Python 适配器 + Python 版 FakeHost 作主控，B4 的 Rust SDK（经其 Python 绑定）作模型。结果：布局（Python 独立实现的偏移 vs `Layout::from_header`）一致；100 步锁步 `step_id` 无丢失；NaN 效力被适配器拦截并清零后恢复；`dt_ns`/`sim_time_ns` 传递正确；reset 后 SDK 返回 `Reset{epoch:1}`、`ack_reset()` 被适配器接受、`step_id` 从 1 重新开始。这是 Rust/Python 两个独立实现首次互通，建议 B9 把它固化为 IT-6。
+- 通读 `client.rs`、`ffi.rs`、`wcp_client.h`：epoch 先于 step_id 检查 ✓；value 先于 validity、`effort_step_id` 最后 Release、再 signal ✓；heartbeat ✓；所有导出函数 `catch_unwind` + 空指针检查 + `// SAFETY` ✓；连接时槽边界校验 ✓；`connect` 对 NotFound/BadMagic/空 manifest 重试 ✓。
+
+### 对你们 3 个"契约缺口"的回复
+1. **C ABI 的 `WCP_RESET`(=2) 与 `wcp_ack_reset`：采纳，已写入本文第 29 行。** 没有它们 C/Python 模型无法在复位时 ack，适配器会一直等到超时，所以这是必须的，不是偏差。
+2. **需求 3 措辞：已改**（第 37 行）：每次 `Step` 后恰好 commit 一次；`Reset` 后 `ack_reset()`，不得 commit。
+3. **`ack_reset()` 无 pending 时 no-op：Rust 签名保持不变（接受），但 C ABI/Python 不应静默成功**——见下面跟进项 F2。
+
+### 跟进项（B4 负责人，小改动）
+- **F1（协议一致性，建议优先做）：`Error` 不应让模型退出。** 现在 `wait_step` 在 `hs_state==Error` 时返回 `Err(Remote)`，模型只能退出；但协议 §7/§10 规定适配器在 Error 下可被显式 `reset` 恢复，模型进程一退出，恢复就会因无人 ack 而再次失败。我已在协议 §10 写明：**只有 `Closed` 终止模型，`Error` 仅在 `connect` 阶段致命**。请把 `check_state()` 改为只对 `Closed` 返回错误，并增加 `ModelClient::hs_state() -> HandshakeState` 供模型自行记录/观察；补一个测试：适配器进入 Error 后 reset，模型收到 `Reset` 并恢复。
+- **F2：误用不要静默成功。** `wcp_ack_reset`（无 pending）与 `wcp_write_f64/vec3`、`wcp_invalidate`（槽方向/类型不对）在 release 构建里返回 0 且什么也没写，模型作者只会看到适配器那边"required 槽 Missing → miss → Error"。建议给 `ModelClient` 加 `try_ack_reset()`/`try_write_f64()`/`try_write_vec3()`/`try_invalidate()`（返回 `Result`，原签名保留并调用它们），FFI 与 Python 用 `try_*` 并返回 -1。
+- **F3：`Closed` 应可区分。** 正常关停时 Python 抛出的是普通 `WcpError('segment closed')`（互操作脚本里就看到了），C 侧只能比对字符串。建议增加返回码 `WCP_CLOSED = 3`（仅 `wcp_wait_step`），Python 绑定返回/抛出专门的 `Closed`，让模型能区分"干净关停"与"出错"。
+- **F4：`connect` 接受 `Paused`。** 握手循环只接受 `Ready/Running`；模型在适配器暂停期间重连会一直等到超时。把 `Paused` 也视为可连接即可。
+- 极小：`client.rs` 的 `ModelClient` 文档注释里 `Segmentation` 应为 `Segment`。
+
+### 对 B5/B7 的影响
+B7 可以直接基于 `WaitEvent`/`ack_reset` 开工（B7 文档里"收到 Closed 或连续超时后退出"与 F1 一致）。F1–F4 不改变冻结接口的名字，只改变错误处理，B7 不需要等。
+
+## 跟进完成（B4 负责人，2026-10-31）
+
+F1–F4 与文档笔误均已处理，冻结接口名字未变。
+
+- **F1**：`check_state()` 只对 `Closed` 返回 `Err(ClientError::Closed)`；`Error` 可恢复。新增 `ModelClient::hs_state() -> HandshakeState`（未知原始值按 `Error` 报告）。新测试 `error_state_does_not_terminate_and_reset_recovers`：适配器进入 `Error` → reset → 模型收到 `Reset`、ack 并重新初始化状态，随后正常继续。
+- **F2**：新增 `try_ack_reset()`、`try_write_f64()`、`try_write_vec3()`、`try_invalidate()`（返回 `Result`），错误变体 `NoPendingReset`、`WrongSlot(String)`；原签名保留并委托给 `try_*`（误用仅 `debug_assert!`）。FFI/Python 全部改用 `try_*`，误用返回 `-1`。新测试 `fallible_operations_report_misuse` 与 pytest 误用断言覆盖。
+- **F3**：新增 `WCP_CLOSED = 3`（仅 `wcp_wait_step`）；Python 绑定抛 `Closed(WcpError)`。新测试 `tests/ffi.rs` 验证关停返回 `WCP_CLOSED`、误用返回 `WCP_ERROR`；pytest 用假库验证 `WCP_CLOSED → Closed`。
+- **F4**：`connect` 接受 `Ready`/`Running`/`Paused`；新测试 `connect_accepts_paused_adapter`。
+- 笔误：`Segmentation` → `Segment`。
+
+验证（本机复现）：`cargo fmt -p coupling-client`；`cargo test -p coupling-client`（api 5、ffi 1、lockstep 4、doctest 1）；`cargo clippy -p coupling-client --all-targets -- -D warnings`；`cargo check -p coupling-client --target x86_64-unknown-linux-gnu --all-targets`；`python -m pytest crates/coupling-client/python -q`（3 passed）；`run_c_smoke.ps1 -Steps 5/1000`（`C_SMOKE_OK`）；`cargo test --workspace --exclude coupling-host`（全部通过）。`cargo test --workspace` 当前因其他 block 正在开发的 `coupling-host` 缺少模块文件而失败，与本 block 改动无关。

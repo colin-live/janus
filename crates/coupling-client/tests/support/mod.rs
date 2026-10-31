@@ -191,6 +191,24 @@ impl TestHost {
             .store(HandshakeState::Ready.as_raw(), Ordering::Release);
     }
 
+    /// Adapter paused before/while the model connects; `connect` must accept this state.
+    pub fn set_paused(&self) {
+        self.header()
+            .hs_state
+            .store(HandshakeState::Paused.as_raw(), Ordering::Release);
+    }
+
+    /// Adapter enters `Error` (protocol §10); a later reset must still recover the model.
+    pub fn set_error(&self, message: &str) {
+        self.seg
+            .write_json(JsonArea::Report, message.as_bytes())
+            .expect("report");
+        self.header()
+            .hs_state
+            .store(HandshakeState::Error.as_raw(), Ordering::Release);
+        self.s2m.signal();
+    }
+
     /// Adapter side of one step: state values + validity, timing, `step_id` last, wakeup.
     pub fn step(&self, n: u64, position: f64) {
         let header = self.header();

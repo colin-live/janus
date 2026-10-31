@@ -80,6 +80,12 @@ def test_lockstep_roundtrip(wcp) -> None:
             assert position is not None
             assert torque is not None
 
+            # Misuse is reported as an error (F2 review), not silently ignored.
+            with pytest.raises(wcp.WcpError):
+                client.ack_reset()
+            with pytest.raises(wcp.WcpError):
+                client.write_f64(position, 1.0)
+
             for n in range(1, steps + 1):
                 step = client.wait_step(15.0)
                 assert step is not None, f"timed out at step {n}"
@@ -102,3 +108,22 @@ def test_lockstep_roundtrip(wcp) -> None:
 def test_connect_to_missing_segment_raises(wcp) -> None:
     with pytest.raises(wcp.WcpError):
         wcp.ModelClient.connect(0xDEAD_BEEF_0000_0001, 7, HELLO, timeout=0.2)
+
+
+def test_wait_step_maps_closed(wcp) -> None:
+    """A clean shutdown (``WCP_CLOSED``) raises the dedicated ``Closed`` error."""
+    assert wcp.WCP_CLOSED == 3
+    assert issubclass(wcp.Closed, wcp.WcpError)
+
+    class FakeLib:
+        @staticmethod
+        def wcp_wait_step(handle, timeout_ms, out):
+            return wcp.WCP_CLOSED
+
+        @staticmethod
+        def wcp_last_error():
+            return b""
+
+    client = wcp.ModelClient(1, FakeLib())
+    with pytest.raises(wcp.Closed):
+        client.wait_step(0.01)

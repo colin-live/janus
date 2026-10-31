@@ -1,8 +1,8 @@
 //! C ABI (`include/wcp_client.h`) around [`ModelClient`].
 //!
 //! Return convention: `0` success, `1` timeout / value unavailable, `2` reset event
-//! (`wcp_wait_step` only), `< 0` error. On any `< 0` result the thread-local message from
-//! [`wcp_last_error`] describes the failure.
+//! (`wcp_wait_step` only), `3` clean shutdown (`wcp_wait_step` only), `< 0` error. On any
+//! `< 0` result the thread-local message from [`wcp_last_error`] describes the failure.
 //!
 //! Every exported function catches unwinding panics: a panic must never cross the C
 //! boundary, so it is converted into `-1` plus a message.
@@ -26,6 +26,8 @@ pub const WCP_OK: i32 = 0;
 pub const WCP_TIMEOUT: i32 = 1;
 /// `wcp_wait_step`: an epoch reset was observed; call [`wcp_ack_reset`] and do not commit.
 pub const WCP_RESET: i32 = 2;
+/// `wcp_wait_step`: the adapter closed the segment cleanly; terminate the model.
+pub const WCP_CLOSED: i32 = 3;
 /// Error; read the message with [`wcp_last_error`].
 pub const WCP_ERROR: i32 = -1;
 
@@ -254,7 +256,8 @@ pub unsafe extern "C" fn wcp_slot_by_name(
 }
 
 /// Wait for the next event: `0` (step written to `out`), `2` (reset event written to `out`,
-/// `step_id == 0`; call [`wcp_ack_reset`]), `1` (timeout) or `< 0` (error).
+/// `step_id == 0`; call [`wcp_ack_reset`]), `1` (timeout), `3` (clean shutdown) or `< 0`
+/// (error).
 ///
 /// # Safety
 /// `client` must be valid and `out` writable.
@@ -270,10 +273,15 @@ pub unsafe extern "C" fn wcp_wait_step(
         if out.is_null() {
             return Err(null_error("out"));
         }
-        match client
+        let event = match client
             .inner
-            .wait_step(Duration::from_millis(u64::from(timeout_ms)))?
+            .wait_step(Duration::from_millis(u64::from(timeout_ms)))
         {
+            Ok(event) => event,
+            Err(ClientError::Closed) => return Ok(WCP_CLOSED),
+            Err(e) => return Err(e),
+        };
+        match event {
             WaitEvent::Step(step) => {
                 // SAFETY: `out` is non-null and writable.
                 unsafe { *out = step.into() };
@@ -290,7 +298,7 @@ pub unsafe extern "C" fn wcp_wait_step(
 }
 
 /// Acknowledge the reset reported by [`wcp_wait_step`] after reinitialising internal state.
-/// Returns `0` or `< 0` (e.g. no reset pending).
+/// Returns `0`, or `< 0` when no reset is pending.
 ///
 /// # Safety
 /// `client` must be a valid pointer from [`wcp_connect`].
@@ -299,7 +307,7 @@ pub unsafe extern "C" fn wcp_ack_reset(client: *mut WcpClient) -> i32 {
     guard(|| {
         // SAFETY: contract above.
         let client = unsafe { client_mut(client)? };
-        client.inner.ack_reset();
+        client.inner.try_ack_reset()?;
         Ok(WCP_OK)
     })
 }
@@ -373,7 +381,7 @@ pub unsafe extern "C" fn wcp_read_quat(client: *const WcpClient, slot: u32, out:
     })
 }
 
-/// Write an F64 effort value. Returns `0` or `< 0`.
+/// Write an F64 effort value. Returns `0`, or `< 0` when the slot is not a ToWebots F64 slot.
 ///
 /// # Safety
 /// `client` must be a valid pointer from [`wcp_connect`].
@@ -382,12 +390,14 @@ pub unsafe extern "C" fn wcp_write_f64(client: *mut WcpClient, slot: u32, value:
     guard(|| {
         // SAFETY: contract above.
         let client = unsafe { client_mut(client)? };
-        client.inner.write_f64(SlotHandle::from_raw(slot), value);
+        client
+            .inner
+            .try_write_f64(SlotHandle::from_raw(slot), value)?;
         Ok(WCP_OK)
     })
 }
 
-/// Write a Vec3 effort value. Returns `0` or `< 0`.
+/// Write a Vec3 effort value. Returns `0`, or `< 0` when the slot is not a ToWebots Vec3 slot.
 ///
 /// # Safety
 /// `client` must be valid and `value` must point to three readable doubles.
@@ -407,13 +417,13 @@ pub unsafe extern "C" fn wcp_write_vec3(
         let v = unsafe { slice::from_raw_parts(value, 3) };
         client
             .inner
-            .write_vec3(SlotHandle::from_raw(slot), [v[0], v[1], v[2]]);
+            .try_write_vec3(SlotHandle::from_raw(slot), [v[0], v[1], v[2]])?;
         Ok(WCP_OK)
     })
 }
 
 /// Mark an effort slot invalid. `validity` uses the protocol byte values (`2` = Invalid,
-/// `5` = Error, …). Returns `0` or `< 0`.
+/// `5` = Error, …). Returns `0`, or `< 0` for an unknown validity or a non-effort slot.
 ///
 /// # Safety
 /// `client` must be a valid pointer from [`wcp_connect`].
@@ -424,7 +434,9 @@ pub unsafe extern "C" fn wcp_invalidate(client: *mut WcpClient, slot: u32, valid
         let client = unsafe { client_mut(client)? };
         let why = Validity::from_raw(validity)
             .ok_or_else(|| ClientError::BadState(format!("unknown validity value {validity}")))?;
-        client.inner.invalidate(SlotHandle::from_raw(slot), why);
+        client
+            .inner
+            .try_invalidate(SlotHandle::from_raw(slot), why)?;
         Ok(WCP_OK)
     })
 }

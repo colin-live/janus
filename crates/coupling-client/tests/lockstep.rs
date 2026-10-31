@@ -10,7 +10,7 @@ use std::thread;
 use std::time::Duration;
 
 use coupling_client::{ClientError, ModelClient, Step, WaitEvent};
-use coupling_core::Validity;
+use coupling_core::{HandshakeState, Validity};
 
 use support::{hello, unique_sim_id, TestHost, TIMEOUT};
 
@@ -217,6 +217,89 @@ fn epoch_reset_is_reported_acked_then_step_ids_restart_at_one() {
         assert_eq!(next.step_id, 2);
         assert_eq!(next.epoch, epoch);
         assert_eq!(host.await_effort(2, TIMEOUT), (Validity::Valid, 7.0));
+
+        host.close();
+    });
+}
+
+/// F1 (review): an adapter `Error` must not terminate the model; a reset recovers it.
+#[test]
+fn error_state_does_not_terminate_and_reset_recovers() {
+    let sim_id = unique_sim_id();
+    let host = TestHost::motor(sim_id, 7);
+    let (tx, rx) = mpsc::channel();
+
+    thread::scope(|scope| {
+        scope.spawn(|| {
+            let mut client = ModelClient::connect(sim_id, 7, hello(), TIMEOUT).expect("connect");
+            let position = client.slot("joint_position").expect("position slot");
+            let torque = client.slot("joint_torque").expect("torque slot");
+            let mut internal = 0.0;
+            loop {
+                match client.wait_step(TIMEOUT) {
+                    Ok(WaitEvent::Step(step)) => {
+                        internal += client.read_f64(position).unwrap_or(0.0);
+                        client.write_f64(torque, internal);
+                        client.commit().expect("commit");
+                        tx.send(Event::Step(step)).expect("send");
+                    }
+                    Ok(WaitEvent::Reset { epoch }) => {
+                        assert_eq!(
+                            client.hs_state(),
+                            HandshakeState::Error,
+                            "the model must still be alive to observe a reset from Error"
+                        );
+                        internal = 0.0;
+                        client.ack_reset();
+                        tx.send(Event::Reset(epoch)).expect("send");
+                    }
+                    Ok(WaitEvent::Timeout) => panic!("client timed out"),
+                    Err(ClientError::Closed) => break,
+                    Err(e) => panic!("client failed: {e}"),
+                }
+            }
+        });
+
+        host.wait_hello(TIMEOUT);
+        host.set_ready();
+
+        host.step(1, 1.0);
+        assert!(matches!(
+            rx.recv_timeout(TIMEOUT).expect("step 1"),
+            Event::Step(step) if step.step_id == 1 && step.epoch == 0
+        ));
+        assert_eq!(host.await_effort(1, TIMEOUT), (Validity::Valid, 1.0));
+
+        // The adapter hits an error; with F1 the model keeps waiting instead of exiting.
+        host.set_error("sensor driver failed");
+        let epoch = host.begin_reset();
+        assert_eq!(
+            rx.recv_timeout(TIMEOUT)
+                .expect("model did not survive hs_state = Error"),
+            Event::Reset(epoch)
+        );
+        host.wait_ack(epoch, TIMEOUT);
+        assert_eq!(
+            host.header()
+                .hs_state
+                .load(std::sync::atomic::Ordering::Acquire),
+            HandshakeState::Error.as_raw(),
+            "the adapter is still in Error until it accepts again"
+        );
+
+        host.set_ready();
+        host.step(1, 4.0);
+        let recovered = match rx.recv_timeout(TIMEOUT).expect("first step after recovery") {
+            Event::Step(step) => step,
+            other => panic!("expected a step after recovery, got {other:?}"),
+        };
+        assert_eq!(recovered.step_id, 1);
+        assert_eq!(recovered.epoch, epoch);
+        assert_eq!(
+            host.await_effort(1, TIMEOUT),
+            (Validity::Valid, 4.0),
+            "model state must be reinitialised after recovering from Error"
+        );
 
         host.close();
     });

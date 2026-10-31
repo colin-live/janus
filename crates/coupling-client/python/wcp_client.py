@@ -41,6 +41,7 @@ __all__ = [
     "Step",
     "Reset",
     "WcpError",
+    "Closed",
     "load_library",
     "WCP_MISSING",
     "WCP_VALID",
@@ -50,6 +51,7 @@ __all__ = [
     "WCP_VALIDITY_ERROR",
     "WCP_ERROR",
     "WCP_RESET",
+    "WCP_CLOSED",
 ]
 
 #: Success (mirrors ``WCP_OK`` in ``include/wcp_client.h``).
@@ -58,6 +60,8 @@ WCP_OK = 0
 WCP_TIMEOUT = 1
 #: Epoch reset (``wait_step`` only); call :meth:`ModelClient.ack_reset`.
 WCP_RESET = 2
+#: Clean adapter shutdown (``wait_step`` only); the model should terminate.
+WCP_CLOSED = 3
 #: Error (message from ``wcp_last_error``).
 WCP_ERROR = -1
 
@@ -75,6 +79,10 @@ _LIB_NAMES = ("coupling_client.dll", "libcoupling_client.so", "libcoupling_clien
 
 class WcpError(RuntimeError):
     """A call into the native client failed (return code ``< 0``)."""
+
+
+class Closed(WcpError):
+    """The adapter closed the segment cleanly; the model should terminate."""
 
 
 class Step(NamedTuple):
@@ -269,6 +277,7 @@ class ModelClient:
 
         Spurious wakeups are ignored. A reset is returned as :class:`Reset`; the caller
         must reinitialise its internal state, call :meth:`ack_reset`, and must not commit.
+        Raises :class:`Closed` on a clean adapter shutdown.
         """
         raw = _WcpStep()
         rc = self._lib.wcp_wait_step(self._handle, _timeout_ms(timeout), ctypes.byref(raw))
@@ -276,6 +285,8 @@ class ModelClient:
             return None
         if rc == WCP_RESET:
             return Reset(epoch=int(raw.epoch))
+        if rc == WCP_CLOSED:
+            raise Closed("segment closed")
         if rc < 0:
             raise WcpError(_last_error(self._lib))
         return Step(
@@ -287,7 +298,10 @@ class ModelClient:
         )
 
     def ack_reset(self) -> None:
-        """Acknowledge a :class:`Reset` after reinitialising the model's internal state."""
+        """Acknowledge a :class:`Reset` after reinitialising the model's internal state.
+
+        Raises :class:`WcpError` when no reset is pending.
+        """
         if self._lib.wcp_ack_reset(self._handle) < 0:
             raise WcpError(_last_error(self._lib))
 
@@ -329,11 +343,15 @@ class ModelClient:
     # ------------------------------------------------------------------ writes
 
     def write_f64(self, slot: int, value: float) -> None:
-        """Write a scalar effort (non-finite values mark the slot ``Invalid``)."""
+        """Write a scalar effort (non-finite values mark the slot ``Invalid``).
+
+        Raises :class:`WcpError` when ``slot`` is not a ToWebots F64 slot.
+        """
         if self._lib.wcp_write_f64(self._handle, slot, float(value)) < 0:
             raise WcpError(_last_error(self._lib))
 
     def write_vec3(self, slot: int, value: Sequence[float]) -> None:
+        """Write a Vec3 effort; non-finite components mark the slot ``Invalid``."""
         if len(value) != 3:
             raise ValueError("write_vec3 expects exactly three values")
         out = (ctypes.c_double * 3)(*(float(v) for v in value))

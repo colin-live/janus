@@ -26,6 +26,10 @@ pub enum ClientError {
     StepNotCommitted,
     /// `commit` was called without a step from `wait_step`, or twice for the same step.
     NoPendingStep,
+    /// `ack_reset` / `try_ack_reset` was called without a pending reset event.
+    NoPendingReset,
+    /// A write/invalidate targeted a slot that is not writable for that operation.
+    WrongSlot(String),
 }
 
 impl fmt::Display for ClientError {
@@ -42,6 +46,8 @@ impl fmt::Display for ClientError {
                 write!(f, "wait_step called before committing the previous step")
             }
             Self::NoPendingStep => write!(f, "commit called without a pending step"),
+            Self::NoPendingReset => write!(f, "ack_reset called without a pending reset"),
+            Self::WrongSlot(why) => write!(f, "slot misuse: {why}"),
         }
     }
 }

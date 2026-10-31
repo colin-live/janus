@@ -121,3 +121,98 @@ fn non_finite_effort_marks_the_slot_invalid() {
         host.close();
     });
 }
+
+/// F2 (review): fallible variants report misuse instead of silently succeeding.
+#[test]
+fn fallible_operations_report_misuse() {
+    let sim_id = unique_sim_id();
+    let host = TestHost::motor(sim_id, 8);
+    let (tx, rx) = mpsc::channel();
+
+    thread::scope(|scope| {
+        scope.spawn(|| {
+            let mut client = ModelClient::connect(sim_id, 8, hello(), TIMEOUT).expect("connect");
+            let position = client.slot("joint_position").expect("position slot");
+            let torque = client.slot("joint_torque").expect("torque slot");
+
+            assert_eq!(
+                client.try_ack_reset(),
+                Err(ClientError::NoPendingReset),
+                "ack_reset without a pending reset must fail"
+            );
+            assert!(
+                matches!(
+                    client.try_write_f64(position, 1.0),
+                    Err(ClientError::WrongSlot(_))
+                ),
+                "writing a ToModel slot must fail"
+            );
+            assert!(
+                matches!(
+                    client.try_write_vec3(torque, [1.0, 2.0, 3.0]),
+                    Err(ClientError::WrongSlot(_))
+                ),
+                "writing a Vec3 to an F64 slot must fail"
+            );
+            assert!(
+                matches!(
+                    client.try_invalidate(position, Validity::Error),
+                    Err(ClientError::WrongSlot(_))
+                ),
+                "invalidating a ToModel slot must fail"
+            );
+
+            client.try_write_f64(torque, 1.0).expect("valid write");
+            client
+                .try_invalidate(torque, Validity::Error)
+                .expect("valid invalidate");
+            tx.send(()).expect("send");
+        });
+
+        host.wait_hello(TIMEOUT);
+        host.set_ready();
+        rx.recv_timeout(TIMEOUT).expect("client checked misuse");
+        host.close();
+    });
+}
+
+/// F4 (review): `connect` also accepts an adapter that is `Paused`.
+#[test]
+fn connect_accepts_paused_adapter() {
+    let sim_id = unique_sim_id();
+    let host = TestHost::motor(sim_id, 9);
+    let (tx, rx) = mpsc::channel();
+
+    thread::scope(|scope| {
+        scope.spawn(|| {
+            let mut client =
+                ModelClient::connect(sim_id, 9, hello(), TIMEOUT).expect("connect while paused");
+            tx.send(0u64).expect("connected");
+            let position = client.slot("joint_position").expect("position slot");
+            let torque = client.slot("joint_torque").expect("torque slot");
+            let step = match client.wait_step(TIMEOUT).expect("wait") {
+                WaitEvent::Step(step) => step,
+                other => panic!("expected a step, got {other:?}"),
+            };
+            assert_eq!(step.step_id, 1);
+            assert_eq!(client.read_f64(position), Some(2.0));
+            client.write_f64(torque, 4.0);
+            client.commit().expect("commit");
+            tx.send(step.step_id).expect("send");
+        });
+
+        host.wait_hello(TIMEOUT);
+        host.set_paused();
+        assert_eq!(
+            rx.recv_timeout(TIMEOUT)
+                .expect("connect must accept Paused"),
+            0,
+            "connect returned before the adapter became Ready"
+        );
+        host.set_ready();
+        host.step(1, 2.0);
+        assert_eq!(rx.recv_timeout(TIMEOUT).expect("step"), 1);
+        assert_eq!(host.await_effort(1, TIMEOUT), (Validity::Valid, 4.0));
+        host.close();
+    });
+}

@@ -2,7 +2,8 @@
  * wcp_client.h — C ABI of Block B4 (coupling-client), protocol v1.
  *
  * Return convention: 0 = success, 1 = timeout / value unavailable,
- * 2 = epoch reset (wcp_wait_step only), < 0 = error (message via wcp_last_error()).
+ * 2 = epoch reset (wcp_wait_step only), 3 = clean shutdown (wcp_wait_step only),
+ * < 0 = error (message via wcp_last_error()).
  *
  * Threading: a wcp_client is single-threaded; do not call it from two threads at once.
  * All pointers returned by this header are owned by the client and stay valid until
@@ -20,6 +21,7 @@ extern "C" {
 #define WCP_OK 0
 #define WCP_TIMEOUT 1
 #define WCP_RESET 2
+#define WCP_CLOSED 3
 #define WCP_ERROR (-1)
 
 typedef struct wcp_client wcp_client;
@@ -62,10 +64,14 @@ int32_t wcp_slot_by_name(const wcp_client *client, const char *name, wcp_slot *o
  * (step_id == 0, epoch_changed == 1). Reinitialise all internal state, then call
  * wcp_ack_reset() and do NOT commit; the adapter waits for the ack before it
  * publishes the first step of the new epoch.
+ * Returns WCP_CLOSED on a clean adapter shutdown: terminate the model.
  */
 int32_t wcp_wait_step(wcp_client *client, uint32_t timeout_ms, wcp_step *out);
 
-/* Acknowledge the reset reported by wcp_wait_step (writes model_epoch_ack). */
+/*
+ * Acknowledge the reset reported by wcp_wait_step (writes model_epoch_ack).
+ * Returns 0, or < 0 when no reset is pending.
+ */
 int32_t wcp_ack_reset(wcp_client *client);
 
 /* Read a slot: 0 and *out set, 1 if unavailable (wrong type / validity != Valid), < 0. */
@@ -73,11 +79,13 @@ int32_t wcp_read_f64(const wcp_client *client, wcp_slot slot, double *out);
 int32_t wcp_read_vec3(const wcp_client *client, wcp_slot slot, double out[3]);
 int32_t wcp_read_quat(const wcp_client *client, wcp_slot slot, double out[4]);
 
-/* Write effort values (non-finite values mark the slot Invalid, protocol §10). */
+/* Write effort values (non-finite values mark the slot Invalid, protocol §10).
+ * Returns < 0 when the slot is not a writable ToWebots slot of the requested type. */
 int32_t wcp_write_f64(wcp_client *client, wcp_slot slot, double value);
 int32_t wcp_write_vec3(wcp_client *client, wcp_slot slot, const double value[3]);
 
-/* Set the validity byte of an effort slot (e.g. WCP_VALIDITY_ERROR). */
+/* Set the validity byte of an effort slot (e.g. WCP_VALIDITY_ERROR).
+ * Returns < 0 for an unknown validity or a non-effort slot. */
 int32_t wcp_invalidate(wcp_client *client, wcp_slot slot, uint8_t validity);
 
 /* Publish the pending step's effort (heartbeat, effort_step_id, m2s wakeup). */

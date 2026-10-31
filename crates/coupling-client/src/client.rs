@@ -88,7 +88,7 @@ struct ClientSlot {
 /// A connected model instance.
 ///
 /// `ModelClient` is deliberately not `Sync`: handshake and step accounting are single
-/// threaded (B4 requirement 6). `Segmentation`/`Notifier` handles stay alive until drop.
+/// threaded (B4 requirement 6). `Segment`/`Notifier` handles stay alive until drop.
 pub struct ModelClient {
     seg: Segment,
     s2m: Notifier,
@@ -118,11 +118,12 @@ enum OpenError {
 }
 
 impl ModelClient {
-    /// Connect to the segment of `(sim_id, instance_id)`, write the hello and wait for `Ready`.
+    /// Connect to the segment of `(sim_id, instance_id)`, write the hello and wait until the
+    /// adapter accepts the model (`Ready`, `Running` or `Paused`).
     ///
     /// `NotFound` and `BadMagic` are retried until `timeout` expires (protocol §6.2), as is an
     /// empty manifest (the host publishes `magic` before writing the manifest, see
-    /// `docs/blocks/B4-client.md` status). The same deadline also covers the wait for `Ready`.
+    /// `docs/blocks/B4-client.md` status). The same deadline also covers the handshake.
     pub fn connect(
         sim_id: u64,
         instance_id: u32,
@@ -178,7 +179,7 @@ impl ModelClient {
 
         loop {
             match state_of(&seg)? {
-                HandshakeState::Ready | HandshakeState::Running => break,
+                HandshakeState::Ready | HandshakeState::Running | HandshakeState::Paused => break,
                 HandshakeState::Error => return Err(remote_error(&seg)),
                 HandshakeState::Closed => return Err(ClientError::Closed),
                 _ => {}
@@ -248,6 +249,16 @@ impl ModelClient {
             .map(|i| SlotHandle(i as u32))
     }
 
+    /// Current handshake state of the segment, for model-side logging/observability.
+    ///
+    /// Unknown raw bytes are reported as [`HandshakeState::Error`]. Only
+    /// [`HandshakeState::Closed`] should terminate the model; [`HandshakeState::Error`] is
+    /// recoverable when the adapter resets (protocol §10).
+    pub fn hs_state(&self) -> HandshakeState {
+        HandshakeState::from_raw(self.seg.header().hs_state.load(Ordering::Acquire))
+            .unwrap_or(HandshakeState::Error)
+    }
+
     /// Wait for the next step or reset, dropping spurious wakeups (protocol §7).
     ///
     /// The epoch is checked *before* `step_id`: a reset wakeup carries no step
@@ -299,18 +310,23 @@ impl ModelClient {
     /// Acknowledge a [`WaitEvent::Reset`] after the model has reinitialised its internal
     /// state: writes `model_epoch_ack = epoch` with release semantics.
     ///
-    /// Calling this without a pending reset is a programming error and is a no-op (the
-    /// frozen signature has no error channel).
+    /// This is the infallible variant kept for the frozen signature: misuse (no pending reset)
+    /// is reported through a debug assertion and is a no-op. Use [`ModelClient::try_ack_reset`]
+    /// when the caller needs to detect misuse.
     pub fn ack_reset(&mut self) {
-        match self.ack_pending.take() {
-            Some(epoch) => {
-                self.seg
-                    .header()
-                    .model_epoch_ack
-                    .store(epoch, Ordering::Release);
-            }
-            None => debug_assert!(false, "ack_reset called without a pending reset event"),
+        if let Err(e) = self.try_ack_reset() {
+            debug_assert!(false, "{e}");
         }
+    }
+
+    /// Fallible [`ModelClient::ack_reset`]: `NoPendingReset` when no reset was reported.
+    pub fn try_ack_reset(&mut self) -> Result<(), ClientError> {
+        let epoch = self.ack_pending.take().ok_or(ClientError::NoPendingReset)?;
+        self.seg
+            .header()
+            .model_epoch_ack
+            .store(epoch, Ordering::Release);
+        Ok(())
     }
 
     /// Read a `f64` slot; `None` unless the slot is an F64 and its validity is `Valid`.
@@ -359,46 +375,71 @@ impl ModelClient {
     }
 
     /// Write an effort value. Non-finite values mark the slot `Invalid` and are not written
-    /// (protocol §10). Writing a ToModel slot or a non-F64 slot is a programming error and
-    /// is ignored (the frozen signature has no error channel).
+    /// (protocol §10). Writing a ToModel slot or a non-F64 slot is a programming error; this
+    /// infallible wrapper debug-asserts and ignores it. Use [`ModelClient::try_write_f64`] to
+    /// detect misuse.
     pub fn write_f64(&mut self, h: SlotHandle, v: f64) {
-        let Some(slot) = self.writable(h, ValueType::F64) else {
-            debug_assert!(false, "write_f64 on a non-effort or non-F64 slot");
-            return;
-        };
+        if let Err(e) = self.try_write_f64(h, v) {
+            debug_assert!(false, "{e}");
+        }
+    }
+
+    /// Fallible [`ModelClient::write_f64`]: `WrongSlot` when `h` is not a ToWebots F64 slot.
+    pub fn try_write_f64(&mut self, h: SlotHandle, v: f64) -> Result<(), ClientError> {
+        let slot = self
+            .writable(h, ValueType::F64)
+            .ok_or_else(|| ClientError::WrongSlot(format!("write_f64 on slot {}", h.raw())))?;
         if !v.is_finite() {
             self.seg
                 .write_validity(slot.validity_off, Validity::Invalid);
-            return;
+            return Ok(());
         }
         self.seg.write_f64(slot.value_off, v);
         self.seg.write_validity(slot.validity_off, Validity::Valid);
+        Ok(())
     }
 
-    /// Write a `Vec3F64` effort. Any non-finite component marks the slot `Invalid`.
+    /// Write a `Vec3F64` effort. Any non-finite component marks the slot `Invalid`. Writing a
+    /// ToModel slot or a non-Vec3 slot debug-asserts and is ignored; see
+    /// [`ModelClient::try_write_vec3`].
     pub fn write_vec3(&mut self, h: SlotHandle, v: [f64; 3]) {
-        let Some(slot) = self.writable(h, ValueType::Vec3F64) else {
-            debug_assert!(false, "write_vec3 on a non-effort or non-Vec3 slot");
-            return;
-        };
+        if let Err(e) = self.try_write_vec3(h, v) {
+            debug_assert!(false, "{e}");
+        }
+    }
+
+    /// Fallible [`ModelClient::write_vec3`]: `WrongSlot` when `h` is not a ToWebots Vec3 slot.
+    pub fn try_write_vec3(&mut self, h: SlotHandle, v: [f64; 3]) -> Result<(), ClientError> {
+        let slot = self
+            .writable(h, ValueType::Vec3F64)
+            .ok_or_else(|| ClientError::WrongSlot(format!("write_vec3 on slot {}", h.raw())))?;
         if !v.iter().all(|x| x.is_finite()) {
             self.seg
                 .write_validity(slot.validity_off, Validity::Invalid);
-            return;
+            return Ok(());
         }
         self.seg.write_f64(slot.value_off, v[0]);
         self.seg.write_f64(slot.value_off + 8, v[1]);
         self.seg.write_f64(slot.value_off + 16, v[2]);
         self.seg.write_validity(slot.validity_off, Validity::Valid);
+        Ok(())
     }
 
-    /// Mark an effort slot with the given validity (e.g. [`Validity::Error`]).
+    /// Mark an effort slot with the given validity (e.g. [`Validity::Error`]). Misuse
+    /// debug-asserts and is ignored; see [`ModelClient::try_invalidate`].
     pub fn invalidate(&mut self, h: SlotHandle, why: Validity) {
-        if let Some(slot) = self.effort(h) {
-            self.seg.write_validity(slot.validity_off, why);
-        } else {
-            debug_assert!(false, "invalidate on a non-effort slot");
+        if let Err(e) = self.try_invalidate(h, why) {
+            debug_assert!(false, "{e}");
         }
+    }
+
+    /// Fallible [`ModelClient::invalidate`]: `WrongSlot` when `h` is not a ToWebots slot.
+    pub fn try_invalidate(&mut self, h: SlotHandle, why: Validity) -> Result<(), ClientError> {
+        let slot = self
+            .effort(h)
+            .ok_or_else(|| ClientError::WrongSlot(format!("invalidate on slot {}", h.raw())))?;
+        self.seg.write_validity(slot.validity_off, why);
+        Ok(())
     }
 
     /// Publish the effort of the pending step: heartbeat, `effort_step_id` (release), then the
@@ -531,7 +572,9 @@ impl ModelClient {
 
     fn check_state(&self) -> Result<HandshakeState, ClientError> {
         match state_of(&self.seg)? {
-            HandshakeState::Error => Err(remote_error(&self.seg)),
+            // Only a clean shutdown terminates the model. `Error` is recoverable: the adapter
+            // may reset and the model must stay alive to acknowledge the new epoch
+            // (protocol §10).
             HandshakeState::Closed => Err(ClientError::Closed),
             state => Ok(state),
         }
