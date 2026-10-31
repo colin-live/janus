@@ -1,0 +1,141 @@
+{
+  "caps": {
+    "hello": 16384,
+    "manifest": 65536,
+    "report": 16384
+  },
+  "expected": {
+    "effort_len": 120,
+    "effort_off": 98656,
+    "hello_off": 65792,
+    "manifest_off": 256,
+    "report_off": 82176,
+    "slots": [
+      {
+        "slot_id": 0,
+        "validity_offset": 98560,
+        "value_offset": 98568
+      },
+      {
+        "slot_id": 1,
+        "validity_offset": 98561,
+        "value_offset": 98576
+      },
+      {
+        "slot_id": 2,
+        "validity_offset": 98562,
+        "value_offset": 98584
+      },
+      {
+        "slot_id": 3,
+        "validity_offset": 98563,
+        "value_offset": 98608
+      },
+      {
+        "slot_id": 7,
+        "validity_offset": 98564,
+        "value_offset": 98640
+      },
+      {
+        "slot_id": 8,
+        "validity_offset": 98565,
+        "value_offset": 98648
+      },
+      {
+        "slot_id": 4,
+        "validity_offset": 98656,
+        "value_offset": 98664
+      },
+      {
+        "slot_id": 5,
+        "validity_offset": 98657,
+        "value_offset": 98672
+      },
+      {
+        "slot_id": 6,
+        "validity_offset": 98658,
+        "value_offset": 98696
+      },
+      {
+        "slot_id": 9,
+        "validity_offset": 98659,
+        "value_offset": 98704
+      }
+    ],
+    "state_len": 96,
+    "state_off": 98560,
+    "total_size": 98776
+  },
+  "specs": [
+    {
+      "direction": "to_model",
+      "entity_id": 1,
+      "signal_id": 1,
+      "slot_id": 0,
+      "value_type": "f64"
+    },
+    {
+      "direction": "to_model",
+      "entity_id": 1,
+      "signal_id": 2,
+      "slot_id": 1,
+      "value_type": "f64"
+    },
+    {
+      "direction": "to_model",
+      "entity_id": 2,
+      "signal_id": 16,
+      "slot_id": 2,
+      "value_type": "vec3f64"
+    },
+    {
+      "direction": "to_model",
+      "entity_id": 2,
+      "signal_id": 17,
+      "slot_id": 3,
+      "value_type": "quatf64"
+    },
+    {
+      "direction": "to_webots",
+      "entity_id": 1,
+      "signal_id": 257,
+      "slot_id": 4,
+      "value_type": "f64"
+    },
+    {
+      "direction": "to_webots",
+      "entity_id": 2,
+      "signal_id": 272,
+      "slot_id": 5,
+      "value_type": "vec3f64"
+    },
+    {
+      "direction": "to_webots",
+      "entity_id": 1,
+      "signal_id": 32769,
+      "slot_id": 6,
+      "value_type": "f64"
+    },
+    {
+      "direction": "to_model",
+      "entity_id": 1,
+      "signal_id": 32770,
+      "slot_id": 7,
+      "value_type": "bool"
+    },
+    {
+      "direction": "to_model",
+      "entity_id": 1,
+      "signal_id": 32771,
+      "slot_id": 8,
+      "value_type": "i32"
+    },
+    {
+      "direction": "to_webots",
+      "entity_id": 1,
+      "signal_id": 32772,
+      "slot_id": 9,
+      "value_type": "mat3f64"
+    }
+  ]
+}

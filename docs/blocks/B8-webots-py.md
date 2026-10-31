@@ -39,3 +39,21 @@ class CouplingAdapter:
 
 ## 不在本 Block
 与 MCP 服务器现有电机工具的仲裁逻辑（被外部驱动的关节让 `set_motor_target` 之类拒绝或转发为模型指令）只暴露 `driven_entities()`，接线放到集成阶段。
+
+
+## 状态（2026-10-30）
+
+**已完成**：`adapters/webots-py` 全部模块（`protocol/layout/shm_win/channel/limits/frames/webots_binding/adapter`）与 58 个测试（`python -m unittest discover -s tests -t .`，无需 Webots），Windows 下连续运行稳定；锁步闭环 500 步，假模型线程下 `exchange` 往返 p50 ≈ 20–25 µs、p99 < 150 µs（仅供参考，真实模型进程会更慢）。
+
+**与文档的偏差 / 实现决定**
+- Linux 后端只留占位（`shm_posix.py`），按 B8 文档"CI 用，可简化"处理；测试在非 Windows 上跳过共享内存部分。
+- 偏移与枚举来自 B1 生成的 `protocol_offsets.json`，布局由 `tests/fixtures/layout_vector.json`（B1 `dump_layout` 生成）与 Rust `Layout::build` 交叉校验。
+- 效果值校验/miss 计数的精确语义已写入协议 §10；`tests/vectors/effort_validation.json`（B9）尚不存在，`test_limits.py` 里有读取它的用例（文件缺失时跳过），B6 实现后需对齐同一语义。
+- 第一次 `exchange` 发生在任何 `robot.step()` 之前，PositionSensor 为 NaN，位置/速度该步为 `Invalid`（模型应容忍；`max_consecutive_misses` 默认 3 足够覆盖）。
+
+**对契约的新增澄清（已写入协议 §7/§10 与 B4 文档，不改二进制布局）**
+1. 复位时适配器必须**唤醒模型**（s2m），模型醒来先比较 epoch 再看 step_id，否则模型阻塞在 `wait` 时永远无法 ack（原文有死锁风险）。B4 的 `wait_step` 因此增加 `WaitEvent::Reset` 与 `ack_reset()`。
+2. 失败步（miss）与 Error 状态下不再等待模型的精确定义。
+
+**待实测（需要真实 Webots，见 B9 spike 清单）**
+- `Motor.setTorque` 是否需要先把电机切到力矩模式；`getTorqueFeedback` 可用性；`addForceWithOffset` 偏移的参考点（质心 vs 节点原点）；`Supervisor.getWorldPath` 在目标 Webots 版本是否存在（已用 `getattr` 兜底）。
