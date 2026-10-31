@@ -1,0 +1,4 @@
+# Python test artifacts (pytest / ctypes import cache)
+__pycache__/
+*.pyc
+.pytest_cache/
