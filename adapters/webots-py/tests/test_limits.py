@@ -58,6 +58,11 @@ class FilterTests(unittest.TestCase):
         self.assertEqual((out, status), ((1.0, 2.0, -2.0), "OutOfRange"))
         self.assertEqual(f.process((1.0, float("nan"), 0.0), 0.001)[2], False)
 
+    def test_bad_limits_are_unusable_with_error_status(self):
+        for args in ((None, None), (float("nan"), None), (-1.0, None), (5.0, float("inf")), (5.0, -2.0)):
+            f = EffortFilter(1, *args)
+            self.assertEqual(f.process((1.0,), 0.001), ((0.0,), "Error", False), args)
+
 
 class ProcessorTests(unittest.TestCase):
     def make(self, misses=3, required=True):
@@ -68,9 +73,16 @@ class ProcessorTests(unittest.TestCase):
         r = p.process({2: (VALID, (1.5,))}, 1_000_000)
         self.assertEqual((r.applied[2], r.missed, r.error), ((1.5,), False, False))
 
-    def test_missing_limits_fail_safe(self):
+    def test_missing_limits_fail_safe_with_error_status(self):
         p = EffortProcessor([slot(2, limits=None)], 3)
-        self.assertEqual(p.process({2: (VALID, (1.0,))}, 1_000_000).applied[2], (0.0,))
+        r = p.process({2: (VALID, (1.0,))}, 1_000_000)
+        self.assertEqual((r.applied[2], r.status[2], r.missed), ((0.0,), "Error", True))
+
+    def test_step_level_failure_reports_error_on_every_slot(self):
+        p = EffortProcessor([slot(1, limits={"max_abs": 5.0}), slot(2, limits={"max_abs": 5.0})], 3)
+        r = p.process(None, 1_000_000, "timeout")
+        self.assertEqual(r.status, {1: "Error", 2: "Error"})
+        self.assertEqual(r.applied, {1: (0.0,), 2: (0.0,)})
 
     def test_consecutive_misses_lead_to_error_and_good_step_resets(self):
         p = self.make(misses=3)
@@ -85,35 +97,70 @@ class ProcessorTests(unittest.TestCase):
         self.assertTrue(r.error)
         self.assertEqual(r.applied[2], (0.0,))
 
-    def test_non_required_slot_does_not_count_as_miss(self):
-        p = self.make(required=False)
-        r = p.process({2: (MISSING, None)}, 1_000_000)
-        self.assertEqual((r.applied[2], r.missed), ((0.0,), False))
+    def test_required_slot_unusable_silences_the_whole_instance(self):
+        p = EffortProcessor([slot(1, limits={"max_abs": 5.0}), slot(2, limits={"max_abs": 5.0})], 3)
+        r = p.process({1: (VALID, (3.0,)), 2: (INVALID, None)}, 1_000_000)
+        self.assertTrue(r.missed)
+        self.assertEqual(r.applied, {1: (0.0,), 2: (0.0,)})
+        self.assertEqual(r.status, {1: "Error", 2: "Invalid"})  # usable slot -> Error, culprit keeps its reason
+        self.assertEqual(p.filters[1].last, [0.0])
+
+    def test_non_required_slot_does_not_count_as_miss_or_silence_others(self):
+        p = EffortProcessor([slot(1, limits={"max_abs": 5.0}, required=True),
+                             slot(2, limits={"max_abs": 5.0}, required=False)], 3)
+        r = p.process({1: (VALID, (3.0,)), 2: (MISSING, None)}, 1_000_000)
+        self.assertEqual((r.missed, r.applied, r.status), (False, {1: (3.0,), 2: (0.0,)}, {1: "Valid", 2: "Missing"}))
 
     def test_non_applicable_types_are_ignored(self):
         p = EffortProcessor([slot(9, vt="mat3f64", limits={"max_abs": 1.0})], 3)
         self.assertEqual(p.filters, {})
 
 
+def parse_number(x):
+    return float(x) if isinstance(x, str) else x  # "nan" / "inf" / "-inf" inject non-finite values
+
+
 class SharedVectorTests(unittest.TestCase):
-    """Consumes tests/vectors/effort_validation.json (owned by B9) when it exists."""
+    """Runs tests/vectors/effort_validation.json (schema v1, owned by B9, produced by B6)."""
 
     def test_vectors(self):
         if not VECTORS.is_file():
-            self.skipTest("effort_validation.json not present yet")
-        for case in json.loads(VECTORS.read_text(encoding="utf-8"))["cases"]:
-            lim = case["limits"]
-            p = EffortProcessor([slot(0, limits={k: v for k, v in lim.items() if v is not None})], 10_000)
+            self.skipTest("effort_validation.json not present")
+        doc = json.loads(VECTORS.read_text(encoding="utf-8-sig"))
+        self.assertEqual(doc["schema_version"], 1)
+        names = set()
+        for case in doc["cases"]:
+            names.add(case["name"])
+            vt = case.get("value_type", "f64")
+            lim = case.get("limits")
+            limits = None if lim is None else {k: v for k, v in lim.items() if v is not None}
+            p = EffortProcessor([slot(0, vt=vt, limits=limits, required=case.get("required", True))],
+                                case.get("max_consecutive_misses", 3))
             for i, step in enumerate(case["steps"]):
-                if not step.get("effort_step_id_ok", True):
-                    r = p.process(None, case["dt_ns"], "stale")
-                else:
-                    validity = {"valid": VALID, "missing": MISSING, "invalid": INVALID}.get(step.get("validity", "valid"))
-                    r = p.process({0: (validity, (step["effort"],))}, case["dt_ns"])
-                exp = step["expect"]
                 msg = "%s step %d" % (case["name"], i)
-                self.assertTrue(math.isclose(r.applied[0][0], exp["value"], abs_tol=1e-12), msg)
-                self.assertEqual(snake(r.status[0]) if r.status[0] != "Stale" else "stale", exp["status"], msg)
+                if not step.get("respond", True) or not step.get("effort_step_id_ok", True):
+                    r = p.process(None, case["dt_ns"], "step-level failure")
+                    timed_out = True
+                else:
+                    effort = step.get("effort", 0.0)
+                    values = tuple(parse_number(x) for x in effort) if isinstance(effort, list) else (parse_number(effort),)
+                    validity = P.VALIDITY[step.get("validity", "valid").title().replace("_", "")]
+                    r = p.process({0: (validity, values)}, case["dt_ns"])
+                    timed_out = False
+                exp = step["expect"]
+                got = r.applied[0]
+                want = tuple(exp["value"]) if isinstance(exp["value"], list) else (exp["value"],)
+                self.assertEqual(len(got), len(want), msg)
+                for a, b in zip(got, want):
+                    self.assertTrue(math.isclose(a, b, abs_tol=1e-12), "%s: %r != %r" % (msg, got, want))
+                self.assertEqual(snake(r.status[0]), exp["status"], msg)
+                if "model_timed_out" in exp:
+                    self.assertEqual(timed_out, exp["model_timed_out"], msg)
+                if "hs_state" in exp:
+                    self.assertEqual("error" if r.error else "running", exp["hs_state"], msg)
+                else:
+                    self.assertFalse(r.error, msg)
+        self.assertGreaterEqual(len(names), 19)
 
 
 if __name__ == "__main__":

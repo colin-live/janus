@@ -1,15 +1,20 @@
 """Effort validation (protocol §10): finite check, clamp, rate limit, miss accounting.
 
-Semantics (shared with the Rust reference in ``mock-webots`` through ``tests/vectors/effort_validation.json``):
+Semantics (identical to the Rust reference in ``mock-webots`` and pinned by
+``tests/vectors/effort_validation.json``):
 
-* A slot value is *usable* only if the model marked it ``Valid`` and every component is finite.
-* Unusable value -> output is zero, ``last`` becomes zero (a safety zeroing is never rate limited).
+* A slot value is *usable* only if the model marked it ``Valid``, every component is finite and the slot has
+  valid limits (``max_abs`` finite and >= 0, ``max_rate_per_s`` finite and >= 0 when given).
+* Unusable value -> output is zero, ``last`` becomes zero (safety zeroing is never rate limited). The status
+  is the slot's own reason: the validity the model reported, ``Invalid`` for non-finite values, ``Error`` for
+  missing/invalid limits.
 * ``|v| > max_abs`` -> clamped, status ``OutOfRange`` (the clamped value IS applied).
-* Rate limit: ``|v - last| <= max_rate_per_s * dt`` applied per component after clamping; it does not
-  change the status.
+* Rate limit: ``|v - last| <= max_rate_per_s * dt`` per component after clamping; the status is unchanged.
 * A *step* is a miss when the step-level exchange failed (timeout / stale ``effort_step_id``) or when any
-  enabled ``required`` effort slot is unusable. ``max_consecutive_misses`` misses in a row -> Error.
-  A fully good step resets the counter. Unusable non-required slots output zero but are not misses.
+  enabled ``required`` effort slot is unusable. **A miss zeroes the whole instance for that step**: every
+  slot outputs 0 and slots that were usable are reported as ``Error``; step-level failures report ``Error``
+  on every slot. Unusable non-required slots output zero but do not make a miss.
+* ``max_consecutive_misses`` misses in a row -> Error; a fully good step resets the counter.
 """
 
 from __future__ import annotations
@@ -23,11 +28,16 @@ from . import protocol as P
 Values = Tuple[float, ...]
 
 
+def _valid_limit(x: Optional[float]) -> bool:
+    return x is not None and math.isfinite(x) and x >= 0.0
+
+
 class EffortFilter:
-    def __init__(self, components: int, max_abs: float, max_rate_per_s: Optional[float]):
+    def __init__(self, components: int, max_abs: Optional[float], max_rate_per_s: Optional[float]):
         self.components = components
         self.max_abs = max_abs
         self.max_rate = max_rate_per_s
+        self.configured = _valid_limit(max_abs) and (max_rate_per_s is None or _valid_limit(max_rate_per_s))
         self.last: List[float] = [0.0] * components
 
     def reset(self) -> None:
@@ -39,6 +49,8 @@ class EffortFilter:
 
     def process(self, values: Optional[Sequence[float]], dt_s: float) -> Tuple[Values, str, bool]:
         """Returns (applied values, validity name, usable)."""
+        if not self.configured:
+            return self.zero(), "Error", False
         if values is None or len(values) != self.components:
             return self.zero(), "Invalid", False
         if not all(math.isfinite(v) for v in values):
@@ -71,7 +83,7 @@ class StepResult:
 
 
 class EffortProcessor:
-    """Per model instance. ``slots`` are the enabled ToWebots slots (``layout.Slot``)."""
+    """Per model instance. ``slots`` are the enabled ToWebots slots (``layout.Slot``) that reach Webots."""
 
     def __init__(self, slots, max_consecutive_misses: int = 3):
         self.max_misses = max(1, int(max_consecutive_misses))
@@ -83,8 +95,10 @@ class EffortProcessor:
             if comps is None:
                 continue  # custom/unsupported types are never applied to Webots
             lim = s.limits or {}
-            # No limits configured -> refuse everything (max_abs 0): fail safe, B3 should have rejected it.
-            self.filters[s.slot_id] = EffortFilter(comps, float(lim.get("max_abs", 0.0)), lim.get("max_rate_per_s"))
+            max_abs = lim.get("max_abs")
+            rate = lim.get("max_rate_per_s")
+            self.filters[s.slot_id] = EffortFilter(
+                comps, None if max_abs is None else float(max_abs), None if rate is None else float(rate))
             self.required[s.slot_id] = s.required
 
     def reset(self) -> None:
@@ -103,7 +117,7 @@ class EffortProcessor:
         if raw is None:
             res.missed = True
             res.applied = self.zero_all()
-            res.status = {sid: "Stale" for sid in self.filters}
+            res.status = {sid: "Error" for sid in self.filters}
             res.messages.append(reason or "step-level failure")
         else:
             for sid, f in self.filters.items():
@@ -117,6 +131,12 @@ class EffortProcessor:
                 if not usable and self.required[sid]:
                     res.missed = True
                     res.messages.append("slot %d unusable (%s)" % (sid, status))
+            if res.missed:
+                # A required slot is unusable: the whole instance is silent for this step.
+                for sid, f in self.filters.items():
+                    res.applied[sid] = f.zero()
+                    if res.status[sid] in ("Valid", "OutOfRange"):
+                        res.status[sid] = "Error"
         if res.missed:
             self.misses += 1
             if self.misses >= self.max_misses:

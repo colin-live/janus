@@ -48,7 +48,7 @@ class CouplingAdapter:
 **与文档的偏差 / 实现决定**
 - Linux 后端只留占位（`shm_posix.py`），按 B8 文档"CI 用，可简化"处理；测试在非 Windows 上跳过共享内存部分。
 - 偏移与枚举来自 B1 生成的 `protocol_offsets.json`，布局由 `tests/fixtures/layout_vector.json`（B1 `dump_layout` 生成）与 Rust `Layout::build` 交叉校验。
-- 效果值校验/miss 计数的精确语义已写入协议 §10；`tests/vectors/effort_validation.json`（B9）尚不存在，`test_limits.py` 里有读取它的用例（文件缺失时跳过），B6 实现后需对齐同一语义。
+- 效果值校验/miss 计数的精确语义已写入协议 §10；`tests/vectors/effort_validation.json`（B6 导出、B9 维护）现已存在，`test_limits.py` 逐条消费全部 19 个用例并通过（2026-10-31）。接入向量时发现 B8 的两处语义与 B6 参考实现不同，已按协议 §10 的最终版修正：①步级失败/缺 limits 的槽状态为 `Error`（原为 `Stale`/`OutOfRange`）；②任一 required 槽不可用时整个实例该步静默（原为只清零出问题的槽）。
 - 第一次 `exchange` 发生在任何 `robot.step()` 之前，PositionSensor 为 NaN，位置/速度该步为 `Invalid`（模型应容忍；`max_consecutive_misses` 默认 3 足够覆盖）。
 
 **对契约的新增澄清（已写入协议 §7/§10 与 B4 文档，不改二进制布局）**

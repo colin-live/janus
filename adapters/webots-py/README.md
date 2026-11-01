@@ -35,6 +35,11 @@ MCP motor tools, can refuse to control them).
 * `joint_velocity` is a finite difference of the PositionSensor (half-step lag, invalid on the first step).
 * The first exchange sees the PositionSensor before any `robot.step()`: position is `Invalid` that step.
 * World frames: `ENU` and `NUE` are supported and converted to the protocol's ENU; `EUN` is rejected.
+* Calling `exchange()` while the instance is `Paused` resumes it implicitly (a pause in the Webots GUI is
+  invisible to the adapter, so the next exchange simply continues). The Rust reference `mock-webots` is
+  stricter and returns zeros in `Paused`.
+* An instance that misses a step (timeout, stale step id, or an unusable `required` effort slot) is silent
+  for the whole step: all of its effort slots output 0 (protocol §10).
 * Windows + x86-64 only in v1 (`shm_posix.py` is a placeholder).
 
 ## Tests
