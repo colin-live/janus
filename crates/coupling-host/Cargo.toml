@@ -5,7 +5,31 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[lib]
+name = "coupling_host"
+path = "src/lib.rs"
+
+[[bin]]
+name = "coupling-host"
+path = "src/main.rs"
+
 [dependencies]
 coupling-core.workspace = true
 coupling-shm.workspace = true
 coupling-config.workspace = true
+serde_json = "1"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Console",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+coupling-client.workspace = true
