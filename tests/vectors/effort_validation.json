@@ -1,0 +1,200 @@
+{
+  "schema_version": 1,
+  "description": "Protocol §10 effort validation vectors. Consumed by B6 (Rust reference adapter) and B8 (Python Webots adapter). Numbers are f64. String efforts 'nan', 'inf', '-inf' inject non-finite values (JSON has no NaN literal). 'respond' false simulates a model timeout; 'effort_step_id_ok' false simulates a stale/mismatched effort_step_id. Missing fields default to effort=0, validity=valid, effort_step_id_ok=true, respond=true.",
+  "cases": [
+    {
+      "name": "valid_scalar",
+      "limits": { "max_abs": 5.0, "max_rate_per_s": null },
+      "dt_ns": 1000000,
+      "steps": [
+        { "effort": 3.0, "expect": { "value": 3.0, "status": "valid" } }
+      ]
+    },
+    {
+      "name": "clamp_max_abs",
+      "limits": { "max_abs": 5.0, "max_rate_per_s": null },
+      "dt_ns": 1000000,
+      "steps": [
+        { "effort": 7.0, "expect": { "value": 5.0, "status": "out_of_range" } }
+      ]
+    },
+    {
+      "name": "clamp_min",
+      "limits": { "max_abs": 5.0, "max_rate_per_s": null },
+      "dt_ns": 1000000,
+      "steps": [
+        { "effort": -7.0, "expect": { "value": -5.0, "status": "out_of_range" } }
+      ]
+    },
+    {
+      "name": "rate_limit",
+      "limits": { "max_abs": 10.0, "max_rate_per_s": 1000.0 },
+      "dt_ns": 1000000,
+      "steps": [
+        { "effort": 0.0, "expect": { "value": 0.0, "status": "valid" } },
+        { "effort": 5.0, "expect": { "value": 1.0, "status": "valid" } },
+        { "effort": -5.0, "expect": { "value": 0.0, "status": "valid" } }
+      ]
+    },
+    {
+      "name": "rate_limit_after_clamp",
+      "limits": { "max_abs": 5.0, "max_rate_per_s": 1000.0 },
+      "dt_ns": 1000000,
+      "steps": [
+        { "effort": 0.0, "expect": { "value": 0.0, "status": "valid" } },
+        { "effort": 100.0, "expect": { "value": 1.0, "status": "out_of_range" } }
+      ]
+    },
+    {
+      "name": "nan_is_invalid",
+      "limits": { "max_abs": 5.0, "max_rate_per_s": null },
+      "dt_ns": 1000000,
+      "steps": [
+        { "effort": "nan", "expect": { "value": 0.0, "status": "invalid" } }
+      ]
+    },
+    {
+      "name": "positive_inf_is_invalid",
+      "limits": { "max_abs": 5.0, "max_rate_per_s": null },
+      "dt_ns": 1000000,
+      "steps": [
+        { "effort": "inf", "expect": { "value": 0.0, "status": "invalid" } }
+      ]
+    },
+    {
+      "name": "negative_inf_is_invalid",
+      "limits": { "max_abs": 5.0, "max_rate_per_s": null },
+      "dt_ns": 1000000,
+      "steps": [
+        { "effort": "-inf", "expect": { "value": 0.0, "status": "invalid" } }
+      ]
+    },
+    {
+      "name": "validity_invalid",
+      "limits": { "max_abs": 5.0, "max_rate_per_s": null },
+      "dt_ns": 1000000,
+      "steps": [
+        { "effort": 3.0, "validity": "invalid", "expect": { "value": 0.0, "status": "invalid" } }
+      ]
+    },
+    {
+      "name": "validity_stale",
+      "limits": { "max_abs": 5.0, "max_rate_per_s": null },
+      "dt_ns": 1000000,
+      "steps": [
+        { "effort": 3.0, "validity": "stale", "expect": { "value": 0.0, "status": "stale" } }
+      ]
+    },
+    {
+      "name": "validity_missing",
+      "limits": { "max_abs": 5.0, "max_rate_per_s": null },
+      "dt_ns": 1000000,
+      "steps": [
+        { "effort": 3.0, "validity": "missing", "expect": { "value": 0.0, "status": "missing" } }
+      ]
+    },
+    {
+      "name": "effort_step_id_lag",
+      "limits": { "max_abs": 5.0, "max_rate_per_s": null },
+      "dt_ns": 1000000,
+      "model_timeout_ms": 5,
+      "steps": [
+        {
+          "effort": 3.0,
+          "effort_step_id_ok": false,
+          "expect": { "value": 0.0, "status": "error", "model_timed_out": true }
+        }
+      ]
+    },
+    {
+      "name": "model_timeout",
+      "limits": { "max_abs": 5.0, "max_rate_per_s": null },
+      "dt_ns": 1000000,
+      "model_timeout_ms": 5,
+      "steps": [
+        {
+          "effort": 3.0,
+          "respond": false,
+          "expect": { "value": 0.0, "status": "error", "model_timed_out": true }
+        }
+      ]
+    },
+    {
+      "name": "consecutive_misses_enter_error",
+      "limits": { "max_abs": 5.0, "max_rate_per_s": null },
+      "dt_ns": 1000000,
+      "model_timeout_ms": 5,
+      "max_consecutive_misses": 3,
+      "steps": [
+        {
+          "effort": 3.0,
+          "respond": false,
+          "expect": { "value": 0.0, "status": "error", "model_timed_out": true }
+        },
+        {
+          "effort": 3.0,
+          "respond": false,
+          "expect": { "value": 0.0, "status": "error", "model_timed_out": true }
+        },
+        {
+          "effort": 3.0,
+          "respond": false,
+          "expect": {
+            "value": 0.0,
+            "status": "error",
+            "model_timed_out": true,
+            "hs_state": "error"
+          }
+        }
+      ]
+    },
+    {
+      "name": "missing_limits",
+      "limits": null,
+      "dt_ns": 1000000,
+      "steps": [
+        { "effort": 3.0, "expect": { "value": 0.0, "status": "error" } }
+      ]
+    },
+    {
+      "name": "non_required_invalid_does_not_trip_error",
+      "limits": { "max_abs": 5.0, "max_rate_per_s": null },
+      "dt_ns": 1000000,
+      "max_consecutive_misses": 1,
+      "required": false,
+      "steps": [
+        { "effort": 3.0, "validity": "invalid", "expect": { "value": 0.0, "status": "invalid" } },
+        { "effort": 3.0, "validity": "invalid", "expect": { "value": 0.0, "status": "invalid" } },
+        { "effort": 3.0, "validity": "invalid", "expect": { "value": 0.0, "status": "invalid" } }
+      ]
+    },
+    {
+      "name": "vec3_clamp",
+      "value_type": "vec3f64",
+      "limits": { "max_abs": 5.0, "max_rate_per_s": null },
+      "dt_ns": 1000000,
+      "steps": [
+        { "effort": [10.0, -10.0, 2.0], "expect": { "value": [5.0, -5.0, 2.0], "status": "out_of_range" } }
+      ]
+    },
+    {
+      "name": "vec3_rate_limit",
+      "value_type": "vec3f64",
+      "limits": { "max_abs": 5.0, "max_rate_per_s": 1000.0 },
+      "dt_ns": 1000000,
+      "steps": [
+        { "effort": [0.0, 0.0, 0.0], "expect": { "value": [0.0, 0.0, 0.0], "status": "valid" } },
+        { "effort": [10.0, -10.0, 2.0], "expect": { "value": [1.0, -1.0, 1.0], "status": "out_of_range" } }
+      ]
+    },
+    {
+      "name": "vec3_nan_component",
+      "value_type": "vec3f64",
+      "limits": { "max_abs": 5.0, "max_rate_per_s": null },
+      "dt_ns": 1000000,
+      "steps": [
+        { "effort": [1.0, "nan", 3.0], "expect": { "value": [0.0, 0.0, 0.0], "status": "invalid" } }
+      ]
+    }
+  ]
+}
